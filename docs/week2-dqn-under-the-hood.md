@@ -446,7 +446,7 @@ what algorithms like DDPG and SAC do.
 
 ---
 
-## $\epsilon$-greedy exploration
+## ε-greedy exploration
 
 A simple rule for balancing **exploration** (try new actions) vs
 **exploitation** (take the greedy action):
