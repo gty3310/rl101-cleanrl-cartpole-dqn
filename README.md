@@ -33,6 +33,54 @@ make eval           # Watch the trained agent balance the pole
 
 <!-- TODO: Add CartPole before/after GIFs -->
 
+## Watching the Trained Agent
+
+After `make train` finishes there are **three ways** to see the trained agent in action:
+
+### 1. Live pygame window (`make eval`)
+
+Opens a native window showing the cart and pole moving in real time. Uses
+`scripts/evaluate.py` with `render_mode='human'`, which automatically loads
+the newest model in `runs/`.
+
+```bash
+make eval              # 5 episodes with a live window
+```
+
+Requires a display:
+- **Linux desktop** — works out of the box
+- **WSL2 on Windows 11** — works out of the box (WSLg handles it)
+- **WSL2 on Windows 10** — needs an X server (e.g. VcXsrv) with `DISPLAY` set
+- **Headless/SSH** — won't work; use option 2 or 3 instead
+
+### 2. Auto-captured eval videos (.mp4)
+
+Training runs with `--capture-video`, so CleanRL automatically records **10 eval
+episodes** as `.mp4` files at the end of training. No display needed.
+
+```bash
+ls videos/CartPole-v1__dqn__1__*-eval/
+# rl-video-episode-0.mp4  rl-video-episode-1.mp4  ...  rl-video-episode-8.mp4
+
+# Open the videos folder in Windows Explorer (from WSL):
+explorer.exe "$(wslpath -w videos/)"
+
+# Or on native Linux:
+xdg-open videos/
+```
+
+The later episodes (episode-8, episode-9) show the agent after the eval warmup
+and are usually the most interesting to watch.
+
+### 3. TensorBoard (metrics + inline videos)
+
+TensorBoard shows the training curves **and** embeds the captured videos in the
+Images tab, so you can scrub through them in your browser without a display.
+
+```bash
+make tensorboard       # then open http://localhost:6006
+```
+
 ## Commands
 
 ```
@@ -58,9 +106,13 @@ Run `make tensorboard` and watch:
 ## Requirements
 
 - Python 3.10 (CleanRL requires `<3.11`; setup creates a conda env)
-- NVIDIA GPU with CUDA support (tested on RTX 5090)
-- PyTorch nightly with CUDA 12.8+
 - conda (for environment management)
+- PyTorch — setup installs the nightly build with CUDA 12.8 for RTX 5090
+  (Blackwell SM 12.0); stable PyTorch works fine on older GPUs
+- NVIDIA GPU **optional for CartPole** — the Q-network is tiny (~13K params),
+  so CPU is typically faster than GPU due to per-step CPU↔GPU transfer
+  overhead. Pass `--no-cuda` to `train_cartpole.py` to force CPU. GPU helps
+  for LunarLander and larger environments.
 
 ## Resources
 
