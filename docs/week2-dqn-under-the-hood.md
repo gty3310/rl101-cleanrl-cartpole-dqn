@@ -27,55 +27,6 @@ the pole for the full 500 steps.
 
 ---
 
-## The whole algorithm at a glance
-
-The rest of this document is a 40-slide deep dive, but if you only look at one
-picture, look at this one. It's the full DQN training loop — every box maps to
-code in `cleanrl/cleanrl/dqn.py` and every section of this deck zooms into one
-of these boxes.
-
-```mermaid
-flowchart TB
-    Start(["make train"])
-    Start --> Init["Initialise online net Qθ<br/>target net Qθ⁻ ← Qθ<br/>replay buffer D (capacity 10k)"]
-    Init --> Observe["Observe state s"]
-    Observe --> Epsilon["Compute ε from linear schedule<br/>1.0 → 0.05 over first 10% of training"]
-    Epsilon --> Choose{"Explore<br/>or exploit?"}
-    Choose -->|"with prob ε"| RandAct["a = random action"]
-    Choose -->|"with prob 1-ε"| GreedyAct["a = argmax Qθ s,a"]
-    RandAct --> Env["Step environment<br/>get r, s', done"]
-    GreedyAct --> Env
-    Env --> AddBuf[("Store s,a,r,s',done<br/>in buffer D")]
-    AddBuf --> Warmup{"step &gt; 10k?<br/>learning_starts"}
-    Warmup -->|"no, fill buffer"| Next["global_step += 1"]
-    Warmup -->|"yes"| TrainCheck{"step mod 4 == 0?<br/>train_frequency"}
-    TrainCheck -->|"no"| SyncCheck
-    TrainCheck -->|"yes"| Sample["Sample minibatch<br/>128 transitions from D"]
-    Sample --> ComputeTarget["TD target<br/>y = r + γ · max Qθ⁻ s',a' · 1-done"]
-    Sample --> ComputeQ["Prediction<br/>q = Qθ s,a"]
-    ComputeTarget --> Loss["MSE loss<br/>L = mean y - q squared"]
-    ComputeQ --> Loss
-    Loss --> AdamStep["Backprop + Adam<br/>θ ← θ - η ∇L"]
-    AdamStep --> SyncCheck{"step mod 500 == 0?<br/>target_network_frequency"}
-    SyncCheck -->|"yes"| HardCopy["Hard copy<br/>θ⁻ ← θ"]
-    SyncCheck -->|"no"| Next
-    HardCopy --> Next
-    Next --> Observe
-
-    style Init fill:#e7f1ff,stroke:#0d6efd
-    style AddBuf fill:#fff3cd,stroke:#d39e00
-    style ComputeTarget fill:#f8d7da,stroke:#dc3545
-    style ComputeQ fill:#d1e7dd,stroke:#198754
-    style HardCopy fill:#e2e3e5,stroke:#6c757d
-```
-
-**Three things to notice:**
-1. **Two Q-networks.** The *online* net Qθ is what we train; the *target* net Qθ⁻ is a frozen copy used to compute stable TD targets. Every 500 steps we hard-copy online → target.
-2. **The replay buffer decouples experience collection from learning.** We add every transition, then sample random minibatches — this breaks temporal correlation and lets us re-use experience.
-3. **Learning is gated twice.** Nothing learns until `step > 10,000` (buffer warmup), and even then only one gradient step every 4 env steps. So training is ~10× cheaper than "update every step."
-
----
-
 ## Table of contents
 
 1. [Part 1 — Week 1 Recap](#part-1--week-1-recap)
@@ -115,7 +66,15 @@ flowchart TB
     - [The roadmap](#the-roadmap-from-the-course-outline)
     - [Why move beyond Q-learning?](#why-move-beyond-q-learning)
     - [What to take away from Week 2](#what-to-take-away-from-week-2)
-7. [References & further reading](#references--further-reading)
+7. [Part 7 — The whole algorithm at a glance](#part-7--the-whole-algorithm-at-a-glance)
+8. [Part 8 — Pen and Paper Walkthrough](#part-8--pen-and-paper-walkthrough)
+    - [The toy environment](#the-toy-environment)
+    - [Episode 1](#episode-1)
+    - [Episode 2](#episode-2)
+    - [Episode 3](#episode-3)
+    - [What we just saw](#what-we-just-saw)
+    - [Where DQN comes in](#where-dqn-comes-in)
+9. [References & further reading](#references--further-reading)
 
 ---
 
@@ -127,16 +86,12 @@ flowchart TB
 
 ## The RL loop
 
-```
-        ┌────────────┐
-        │   Agent    │
-        └─────┬──────┘
-      action  │      ▲ state s_t, reward r_t
-          a_t │      │
-              ▼      │
-        ┌────────────┐
-        │Environment │
-        └────────────┘
+```mermaid
+flowchart LR
+    Agent(["Agent"])
+    Env(["Environment"])
+    Agent -->|"action a_t"| Env
+    Env -->|"next state s_t+1<br/>reward r_t"| Agent
 ```
 
 At every timestep $t$:
@@ -848,6 +803,277 @@ bootstrap-on-bootstrap instability of TD in long horizons.
 5. **The loss is a stale-target MSE** — $\mathbb{E}[(r + \gamma \max_{a'} Q_{\theta^{-}}(s', a') - Q_{\theta}(s, a))^2]$.
 6. **CleanRL's `dqn.py` is ~60 lines of real logic.** You can read it end-to-end.
 7. **Hyperparameters matter but the defaults in CleanRL are sane** for the classic environments. Change them one at a time and watch TensorBoard.
+
+---
+
+## Part 7 — The whole algorithm at a glance
+
+Every box in this flowchart maps to code in `cleanrl/cleanrl/dqn.py` and every
+previous section of this deck zooms into one of them. If you only take one
+picture with you from Week 2, take this one.
+
+```mermaid
+flowchart LR
+    Start(["make train"])
+    Start --> Init["Initialise online net Qθ<br/>target net Qθ⁻ ← Qθ<br/>replay buffer D capacity 10k"]
+    Init --> Observe["Observe state s"]
+    Observe --> Epsilon["Compute ε from<br/>linear schedule"]
+    Epsilon --> Choose{"Explore<br/>or exploit?"}
+    Choose -->|"prob ε"| RandAct["a = random action"]
+    Choose -->|"prob 1-ε"| GreedyAct["a = argmax Qθ s,a"]
+    RandAct --> Env["env.step a<br/>get r, s', done"]
+    GreedyAct --> Env
+    Env --> AddBuf[("Store transition<br/>in buffer D")]
+    AddBuf --> Warmup{"step &gt; 10k?"}
+    Warmup -->|"no"| Next["global_step += 1"]
+    Warmup -->|"yes"| TrainCheck{"step mod 4 == 0?"}
+    TrainCheck -->|"no"| SyncCheck
+    TrainCheck -->|"yes"| Sample["Sample 128 transitions"]
+    Sample --> ComputeTarget["TD target<br/>y = r + γ · max Qθ⁻ · 1-done"]
+    Sample --> ComputeQ["Prediction<br/>q = Qθ s,a"]
+    ComputeTarget --> Loss["MSE loss<br/>L = mean y-q squared"]
+    ComputeQ --> Loss
+    Loss --> AdamStep["Backprop + Adam<br/>θ ← θ - η ∇L"]
+    AdamStep --> SyncCheck{"step mod 500 == 0?"}
+    SyncCheck -->|"yes"| HardCopy["Hard copy<br/>θ⁻ ← θ"]
+    SyncCheck -->|"no"| Next
+    HardCopy --> Next
+    Next --> Observe
+
+    style Init fill:#e7f1ff,stroke:#0d6efd
+    style AddBuf fill:#fff3cd,stroke:#d39e00
+    style ComputeTarget fill:#f8d7da,stroke:#dc3545
+    style ComputeQ fill:#d1e7dd,stroke:#198754
+    style HardCopy fill:#e2e3e5,stroke:#6c757d
+```
+
+**Three things to notice:**
+
+1. **Two Q-networks.** The *online* net `Qθ` is what we train; the *target* net `Qθ⁻` is a frozen copy used to compute stable TD targets. Every 500 steps we hard-copy online → target.
+2. **The replay buffer decouples experience collection from learning.** We add every transition, then sample random minibatches — this breaks temporal correlation and lets us re-use experience.
+3. **Learning is gated twice.** Nothing learns until `step > 10,000` (buffer warmup), and even then only one gradient step every 4 env steps. So training is ~10x cheaper than "update every step."
+
+---
+
+## Part 8 — Pen and Paper Walkthrough
+
+### Everything above, on a tiny 3-state corridor
+
+To consolidate everything so far — MDP formalism, Q-learning update rule,
+Bellman equation, TD error, convergence — let's run Q-learning **by hand** on
+an environment so small it fits on a napkin.
+
+---
+
+## The toy environment
+
+A 3-state corridor. The agent starts at `S0` and wants to reach the goal `G`.
+At `G` the episode ends with reward +1. Elsewhere, reward 0.
+
+```mermaid
+flowchart LR
+    S0(["S0<br/>start"]) -->|"right, r=0"| S1(["S1"])
+    S1 -->|"right, r=+1<br/>done"| G(["G<br/>terminal"])
+    S1 -->|"left, r=0"| S0
+    S0 -->|"left, r=0"| S0
+```
+
+**MDP specification:**
+
+- **States** $\mathcal{S} = \{S_0,\ S_1,\ G\}$, with $G$ terminal
+- **Actions** $\mathcal{A} = \{\text{left},\ \text{right}\}$
+- **Transitions** (deterministic):
+  - $S_0 + \text{right} \to S_1$
+  - $S_0 + \text{left}  \to S_0$ (bumps a wall, stays)
+  - $S_1 + \text{right} \to G$ (terminates, reward +1)
+  - $S_1 + \text{left}  \to S_0$
+- **Rewards:** +1 only on the transition into $G$, otherwise 0
+- **Discount** $\gamma = 0.5$ (chosen to keep fractions clean)
+- **Learning rate** $\alpha = 0.5$
+
+**Sanity check: what's the true $Q^{\ast}$ we should converge to?**
+
+From $S_1$, "right" terminates the episode with immediate reward 1 and no
+future rewards, so $Q^{\ast}(S_1, \text{right}) = 1$.
+
+From $S_0$, "right" gives reward 0 and lands in $S_1$, from which the best
+next action is "right" (value 1), so
+$Q^{\ast}(S_0, \text{right}) = 0 + \gamma \cdot Q^{\ast}(S_1, \text{right}) = 0.5 \cdot 1 = 0.5$.
+
+The "left" actions are strictly worse. The optimal Q-table is:
+
+| State | left | right    |
+|-------|-----:|---------:|
+| $S_0$ |  0   | **0.5**  |
+| $S_1$ |  0   | **1.0**  |
+
+We'll start with $Q \equiv 0$ everywhere and run 3 episodes where the agent
+always happens to go "right" (pretend the initial $\varepsilon$-greedy rolls
+landed on the good action — it keeps the arithmetic short).
+
+The update rule we'll apply every step:
+
+$$
+Q(s,a) \leftarrow Q(s,a) + \alpha \cdot \left( r + \gamma \cdot \max_{a'} Q(s', a') - Q(s,a) \right)
+$$
+
+---
+
+## Episode 1
+
+**Initial Q-table** ($Q \equiv 0$):
+
+| State | left | right |
+|-------|-----:|------:|
+| $S_0$ |  0   |   0   |
+| $S_1$ |  0   |   0   |
+
+Trajectory: $S_0 \xrightarrow{\text{right}, r=0} S_1 \xrightarrow{\text{right}, r=1, \text{done}} G$.
+
+**Update 1 — transition $(S_0, \text{right}, 0, S_1)$:**
+
+$$
+Q(S_0, \text{right}) \leftarrow 0 + 0.5 \cdot \left( 0 + 0.5 \cdot \max(0, 0) - 0 \right) = 0
+$$
+
+No update. There's no reward yet, and the future value is still zero, so the
+TD error is zero. This is expected: the first time we see a new state, we
+have nothing to propagate.
+
+**Update 2 — transition $(S_1, \text{right}, 1, G)$:**
+
+$G$ is terminal, so we multiply the future term by $(1 - \text{done}) = 0$:
+
+$$
+Q(S_1, \text{right}) \leftarrow 0 + 0.5 \cdot \left( 1 + 0.5 \cdot 0 \cdot 0 - 0 \right) = 0 + 0.5 \cdot 1 = 0.5
+$$
+
+**Q-table after Episode 1:**
+
+| State | left | right     |
+|-------|-----:|----------:|
+| $S_0$ |  0   |   0       |
+| $S_1$ |  0   | **0.5**   |
+
+The reward has reached $S_1$ but hasn't propagated back to $S_0$ yet.
+
+---
+
+## Episode 2
+
+Same trajectory $S_0 \to S_1 \to G$.
+
+**Update 1 — transition $(S_0, \text{right}, 0, S_1)$:**
+
+Now $Q(S_1, \text{right}) = 0.5$, so the max future value is 0.5:
+
+$$
+Q(S_0, \text{right}) \leftarrow 0 + 0.5 \cdot \left( 0 + 0.5 \cdot 0.5 - 0 \right) = 0 + 0.5 \cdot 0.25 = 0.125
+$$
+
+This is the reward propagating backward one step.
+
+**Update 2 — transition $(S_1, \text{right}, 1, G)$:**
+
+$$
+Q(S_1, \text{right}) \leftarrow 0.5 + 0.5 \cdot \left( 1 - 0.5 \right) = 0.5 + 0.25 = 0.75
+$$
+
+**Q-table after Episode 2:**
+
+| State | left | right        |
+|-------|-----:|-------------:|
+| $S_0$ |  0   | **0.125**    |
+| $S_1$ |  0   | **0.75**     |
+
+---
+
+## Episode 3
+
+**Update 1 — transition $(S_0, \text{right}, 0, S_1)$:**
+
+$$
+Q(S_0, \text{right}) \leftarrow 0.125 + 0.5 \cdot \left( 0 + 0.5 \cdot 0.75 - 0.125 \right)
+$$
+
+$$
+= 0.125 + 0.5 \cdot (0.375 - 0.125) = 0.125 + 0.5 \cdot 0.25 = 0.25
+$$
+
+**Update 2 — transition $(S_1, \text{right}, 1, G)$:**
+
+$$
+Q(S_1, \text{right}) \leftarrow 0.75 + 0.5 \cdot \left( 1 - 0.75 \right) = 0.75 + 0.125 = 0.875
+$$
+
+**Q-table after Episode 3:**
+
+| State | left | right       |
+|-------|-----:|------------:|
+| $S_0$ |  0   | **0.25**    |
+| $S_1$ |  0   | **0.875**   |
+
+---
+
+## What we just saw
+
+Across three episodes, the "right" values evolved:
+
+| Episode | $Q(S_0, \text{right})$ | $Q(S_1, \text{right})$ |
+|--------:|----------------------:|----------------------:|
+|    0 (init)  | 0                 | 0                 |
+|    1    | 0                     | 0.5                   |
+|    2    | 0.125                 | 0.75                  |
+|    3    | 0.25                  | 0.875                 |
+|  $\infty$ (true $Q^{\ast}$) | **0.5** | **1.0** |
+
+Both are converging to their optimal values. Three concepts made visible:
+
+**1. Reward propagates backwards.** After Episode 1 only $S_1$ knew about the
+goal. After Episode 2 the signal had reached $S_0$. Information flows
+`goal → previous state → state-before-that → ...` through the chain of
+Q-learning updates. This is the same reason DQN takes so long on environments
+with long horizons: every update only moves the signal back one step.
+
+**2. The update is a contraction.** Each step does
+$Q \leftarrow Q + \alpha \cdot (y - Q)$, moving $Q$ a fraction $\alpha$
+of the way toward the target $y$. With $\alpha \lt 1$ we never overshoot,
+and with $\gamma \lt 1$ the targets stay bounded. These two facts are
+what give us the convergence guarantee in the tabular case.
+
+**3. The Bellman equation is the fixed point.** At convergence the TD error
+$y - Q$ is zero, which means
+$Q(s, a) = r + \gamma \cdot \max_{a'} Q(s', a')$ — literally the Bellman
+optimality equation. Q-learning is just stochastic fixed-point iteration on
+the Bellman operator.
+
+---
+
+## Where DQN comes in
+
+The calculation we just did needs one table cell per $(s, a)$ pair. For
+CartPole's 4-dimensional continuous state space that's infeasible — the
+curse of dimensionality from Part 3.
+
+DQN replaces the table with a neural network $Q_\theta(s, a)$ that
+*generalises* across similar states. The update rule is the same in spirit:
+
+| | Tabular | DQN |
+|---|---|---|
+| Prediction | $Q(s, a)$ lookup in a table | $Q_\theta(s, a)$ forward pass |
+| Target | $y = r + \gamma \cdot \max_{a'} Q(s', a')$ | $y = r + \gamma \cdot \max_{a'} Q_{\theta^{-}}(s', a')$ |
+| Update | $Q \leftarrow Q + \alpha (y - Q)$ | $\theta \leftarrow \theta - \eta \nabla_\theta (y - Q_\theta)^2$ |
+| Stability trick | none needed | replay buffer + target network |
+
+The target network $Q_{\theta^{-}}$ plays exactly the role of "the Q-values
+I looked at before the update" in the tabular rule — it holds still while
+we're computing the gradient, so we aren't chasing a moving target. Replay
+buffer sampling makes the updates look like i.i.d. mini-batches, so the
+SGD assumptions approximately hold.
+
+Everything else is the same algorithm you just did on paper. Every time
+`cleanrl/cleanrl/dqn.py` runs one gradient step, it is doing a vectorised
+neural-network version of the two updates we did for Episode 1.
 
 ---
 
